@@ -1,0 +1,45 @@
+let buckets = Resources.*[ Type == 'AWS::S3::Bucket' ]
+rule private_buckets when %buckets !empty {
+    %buckets.Properties.PublicAccessBlockConfiguration {
+        BlockPublicAcls == true
+        IgnorePublicAcls == true
+        BlockPublicPolicy == true
+        RestrictPublicBuckets == true
+    }
+    %buckets.Properties.BucketEncryption exists
+    %buckets.DeletionPolicy == 'Retain'
+}
+let tables = Resources.*[ Type == 'AWS::DynamoDB::Table' ]
+rule durable_encrypted_state when %tables !empty {
+    %tables.Properties.SSESpecification.SSEEnabled == true
+    %tables.Properties.PointInTimeRecoverySpecification.PointInTimeRecoveryEnabled == true
+    %tables.DeletionPolicy == 'Retain'
+    %tables.UpdateReplacePolicy == 'Retain'
+}
+let routes = Resources.*[ Type == 'AWS::ApiGatewayV2::Route' ]
+rule authenticated_routes when %routes !empty {
+    %routes.Properties.AuthorizationType == 'JWT'
+    %routes.Properties.AuthorizationScopes !empty
+}
+let pools = Resources.*[ Type == 'AWS::Cognito::UserPool' ]
+rule invite_only when %pools !empty {
+    %pools.Properties.AdminCreateUserConfig.AllowAdminCreateUserOnly == true
+}
+let clients = Resources.*[ Type == 'AWS::Cognito::UserPoolClient' ]
+rule browser_client when %clients !empty {
+    %clients.Properties.GenerateSecret == false
+    %clients.Properties.AllowedOAuthFlows == [ 'code' ]
+}
+let queues = Resources.*[ Type == 'AWS::SQS::Queue' ]
+rule encrypted_queues when %queues !empty {
+    %queues.Properties.SqsManagedSseEnabled == true
+}
+let queue_policies = Resources.*[ Type == 'AWS::SQS::QueuePolicy' ]
+rule one_resource_per_queue_statement when %queue_policies !empty {
+    %queue_policies.Properties.PolicyDocument.Statement[*].Resource is_struct
+}
+let logs = Resources.*[ Type == 'AWS::Logs::LogGroup' ]
+rule bounded_encrypted_logs when %logs !empty {
+    %logs.Properties.KmsKeyId exists
+    %logs.Properties.RetentionInDays <= 7
+}

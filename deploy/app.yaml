@@ -1,0 +1,447 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Nevermind protected workshop sandbox with asynchronous model analysis and transactional approvals.
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@v2
+  com.aws.cloudformation.Context:
+    must:
+      - Only authenticated users may queue model work or mutate their own sandbox.
+      - Approval applies to an exact preview and current resource versions.
+      - Runtime model access is private; the website does not receive AWS credentials.
+Parameters:
+  CodeBucket:
+    Type: String
+    AllowedPattern: "[a-z0-9.-]+"
+  CodeKey:
+    Type: String
+    AllowedPattern: "[A-Za-z0-9/_.-]+"
+  RuntimeArn:
+    Type: String
+    AllowedPattern: "arn:aws:bedrock-agentcore:[a-z0-9-]+:[0-9]{12}:runtime/[A-Za-z0-9_-]+"
+  RuntimeQualifier:
+    Type: String
+    Default: probe
+    AllowedPattern: "[A-Za-z0-9_]+"
+Resources:
+  State:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Durable per-user workspace, immutable previews, and action history.
+        must: [Preserve conditional transactions and retain data on replacement.]
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - {AttributeName: pk, AttributeType: S}
+        - {AttributeName: sk, AttributeType: S}
+      KeySchema:
+        - {AttributeName: pk, KeyType: HASH}
+        - {AttributeName: sk, KeyType: RANGE}
+      SSESpecification: {SSEEnabled: true}
+      PointInTimeRecoverySpecification: {PointInTimeRecoveryEnabled: true}
+      TimeToLiveSpecification: {AttributeName: expires_at, Enabled: true}
+  FailedJobs:
+    Type: AWS::SQS::Queue
+    Properties:
+      SqsManagedSseEnabled: true
+      MessageRetentionPeriod: 604800
+  Jobs:
+    Type: AWS::SQS::Queue
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Model startup can exceed a synchronous HTTP request timeout.
+        must: [Visibility timeout must exceed six times the worker timeout.]
+    Properties:
+      SqsManagedSseEnabled: true
+      VisibilityTimeout: 1440
+      ReceiveMessageWaitTimeSeconds: 20
+      MessageRetentionPeriod: 86400
+      RedrivePolicy: {deadLetterTargetArn: !GetAtt FailedJobs.Arn, maxReceiveCount: 2}
+  QueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: [!Ref Jobs]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Deny
+            Principal: "*"
+            Action: sqs:*
+            Resource: !GetAtt Jobs.Arn
+            Condition: {Bool: {aws:SecureTransport: false}}
+  FailedQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: [!Ref FailedJobs]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Deny
+            Principal: "*"
+            Action: sqs:*
+            Resource: !GetAtt FailedJobs.Arn
+            Condition: {Bool: {aws:SecureTransport: false}}
+  LogKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: Nevermind application log encryption
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {AWS: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:root"}
+            Action: kms:*
+            Resource: "*"
+          - Effect: Allow
+            Principal: {Service: !Sub "logs.${AWS::Region}.amazonaws.com"}
+            Action: [kms:Encrypt, kms:Decrypt, kms:ReEncrypt*, kms:GenerateDataKey*, kms:DescribeKey]
+            Resource: "*"
+            Condition:
+              ArnLike:
+                kms:EncryptionContext:aws:logs:arn:
+                  - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-*"
+                  - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/apigateway/${AWS::StackName}"
+  ApiLog:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-api"
+      KmsKeyId: !GetAtt LogKey.Arn
+      RetentionInDays: 7
+  WorkerLog:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-worker"
+      KmsKeyId: !GetAtt LogKey.Arn
+      RetentionInDays: 7
+  HttpLog:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/apigateway/${AWS::StackName}"
+      KmsKeyId: !GetAtt LogKey.Arn
+      RetentionInDays: 7
+  ApiRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: lambda.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: WorkspaceApi
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:DeleteItem, dynamodb:ConditionCheckItem, dynamodb:Query]
+                Resource: !GetAtt State.Arn
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt Jobs.Arn
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !GetAtt ApiLog.Arn
+  WorkerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: lambda.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AnalyzeOnly
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:DeleteItem, dynamodb:ConditionCheckItem]
+                Resource: !GetAtt State.Arn
+              - Effect: Allow
+                Action: [sqs:ReceiveMessage, sqs:DeleteMessage, sqs:GetQueueAttributes]
+                Resource: !GetAtt Jobs.Arn
+              - Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/us.amazon.nova-2-lite-v1:0"
+                  - !Sub "arn:${AWS::Partition}:bedrock:us-*::foundation-model/amazon.nova-2-lite-v1:0"
+              - Effect: Allow
+                Action: [bedrock-agentcore:InvokeAgentRuntime, bedrock-agentcore:StopRuntimeSession]
+                Resource: [!Ref RuntimeArn, !Sub "${RuntimeArn}/runtime-endpoint/${RuntimeQualifier}"]
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !GetAtt WorkerLog.Arn
+  ApiFunction:
+    Type: AWS::Lambda::Function
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Short authenticated API requests never wait for model inference.
+        must: [No public function URL; only API Gateway invokes this function.]
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-api"
+      Runtime: python3.12
+      Architectures: [x86_64]
+      Handler: nevermind.handler.handler
+      Role: !GetAtt ApiRole.Arn
+      Code: {S3Bucket: !Ref CodeBucket, S3Key: !Ref CodeKey}
+      Timeout: 20
+      MemorySize: 256
+      Environment:
+        Variables:
+          NEVERMIND_TABLE_NAME: !Ref State
+          NEVERMIND_QUEUE_URL: !Ref Jobs
+          NEVERMIND_RUNTIME_ARN: !Ref RuntimeArn
+          NEVERMIND_RUNTIME_QUALIFIER: !Ref RuntimeQualifier
+  WorkerFunction:
+    Type: AWS::Lambda::Function
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Bounded background analysis prepares previews but cannot approve them.
+        must: [Do not expose a public invocation endpoint for this worker.]
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-worker"
+      Runtime: python3.12
+      Architectures: [x86_64]
+      Handler: nevermind.handler.handler
+      Role: !GetAtt WorkerRole.Arn
+      Code: {S3Bucket: !Ref CodeBucket, S3Key: !Ref CodeKey}
+      Timeout: 240
+      MemorySize: 512
+      Environment:
+        Variables:
+          NEVERMIND_TABLE_NAME: !Ref State
+          NEVERMIND_QUEUE_URL: !Ref Jobs
+          NEVERMIND_RUNTIME_ARN: !Ref RuntimeArn
+          NEVERMIND_RUNTIME_QUALIFIER: !Ref RuntimeQualifier
+  WorkerSource:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt Jobs.Arn
+      FunctionName: !Ref WorkerFunction
+      BatchSize: 1
+      FunctionResponseTypes: [ReportBatchItemFailures]
+      ScalingConfig: {MaximumConcurrency: 2}
+  Users:
+    Type: AWS::Cognito::UserPool
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Invite-only access prevents anonymous model spending.
+        must: [Disable public registration; each user owns a separate sandbox.]
+    Properties:
+      UserPoolName: !Sub "${AWS::StackName}-users"
+      UserPoolTier: ESSENTIALS
+      AdminCreateUserConfig: {AllowAdminCreateUserOnly: true}
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 14
+          RequireLowercase: true
+          RequireUppercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+      MfaConfiguration: OPTIONAL
+      EnabledMfas: [SOFTWARE_TOKEN_MFA]
+  LoginDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      UserPoolId: !Ref Users
+      Domain: !Sub "${AWS::StackName}-${AWS::AccountId}"
+      ManagedLoginVersion: 2
+  BrowserClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref Users
+      ClientName: !Sub "${AWS::StackName}-browser"
+      GenerateSecret: false
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows: [code]
+      AllowedOAuthScopes: [openid, profile]
+      SupportedIdentityProviders: [COGNITO]
+      CallbackURLs: [!Sub "https://${Website.DomainName}/"]
+      LogoutURLs: [!Sub "https://${Website.DomainName}/"]
+      AccessTokenValidity: 15
+      IdTokenValidity: 15
+      RefreshTokenValidity: 1
+      TokenValidityUnits: {AccessToken: minutes, IdToken: minutes, RefreshToken: days}
+      EnableTokenRevocation: true
+      PreventUserExistenceErrors: ENABLED
+      ExplicitAuthFlows: [ALLOW_USER_SRP_AUTH, ALLOW_ADMIN_USER_PASSWORD_AUTH]
+  LoginBranding:
+    Type: AWS::Cognito::ManagedLoginBranding
+    Properties:
+      UserPoolId: !Ref Users
+      ClientId: !Ref BrowserClient
+      UseCognitoProvidedValues: true
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub "${AWS::StackName}-api"
+      ProtocolType: HTTP
+  Integration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt ApiFunction.Arn
+      PayloadFormatVersion: "2.0"
+      TimeoutInMillis: 20000
+  Authorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId: !Ref HttpApi
+      Name: SignedInUsers
+      AuthorizerType: JWT
+      IdentitySource: ["$request.header.Authorization"]
+      JwtConfiguration:
+        Audience: [!Ref BrowserClient]
+        Issuer: !Sub "https://cognito-idp.${AWS::Region}.amazonaws.com/${Users}"
+  ApiRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "ANY /api/{proxy+}"
+      AuthorizationType: JWT
+      AuthorizationScopes: [openid]
+      AuthorizerId: !Ref Authorizer
+      Target: !Sub "integrations/${Integration}"
+  ApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: "$default"
+      AutoDeploy: true
+      DefaultRouteSettings: {ThrottlingBurstLimit: 5, ThrottlingRateLimit: 2}
+      AccessLogSettings:
+        DestinationArn: !GetAtt HttpLog.Arn
+        Format: '{"requestId":"$context.requestId","status":"$context.status","route":"$context.routeKey"}'
+  ApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref ApiFunction
+      Principal: apigateway.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+      SourceArn: !Sub "arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*"
+  WebFiles:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: {SSEAlgorithm: AES256}
+      VersioningConfiguration: {Status: Enabled}
+  WebAccess:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "${AWS::StackName}-web"
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+  WebHeaders:
+    Type: AWS::CloudFront::ResponseHeadersPolicy
+    Properties:
+      ResponseHeadersPolicyConfig:
+        Name: !Sub "${AWS::StackName}-headers"
+        SecurityHeadersConfig:
+          ContentTypeOptions: {Override: true}
+          FrameOptions: {FrameOption: DENY, Override: true}
+          ReferrerPolicy: {ReferrerPolicy: no-referrer, Override: true}
+          StrictTransportSecurity: {AccessControlMaxAgeSec: 63072000, IncludeSubdomains: true, Override: true}
+          ContentSecurityPolicy:
+            Override: true
+            ContentSecurityPolicy: "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' https://*.amazoncognito.com; img-src 'self' data:; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self' https://*.amazoncognito.com"
+  NoApiCache:
+    Type: AWS::CloudFront::CachePolicy
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: API responses contain per-user plans and must never be cached.
+        must: [Keep all cache lifetimes at zero.]
+    Properties:
+      CachePolicyConfig:
+        Name: !Sub "${AWS::StackName}-no-api-cache"
+        DefaultTTL: 0
+        MinTTL: 0
+        MaxTTL: 0
+        ParametersInCacheKeyAndForwardedToOrigin:
+          EnableAcceptEncodingGzip: false
+          CookiesConfig: {CookieBehavior: none}
+          HeadersConfig: {HeaderBehavior: none}
+          QueryStringsConfig: {QueryStringBehavior: none}
+  Website:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        HttpVersion: http2and3
+        PriceClass: PriceClass_100
+        Origins:
+          - Id: files
+            DomainName: !GetAtt WebFiles.RegionalDomainName
+            OriginAccessControlId: !Ref WebAccess
+            S3OriginConfig: {OriginAccessIdentity: ""}
+          - Id: api
+            DomainName: !Sub "${HttpApi}.execute-api.${AWS::Region}.amazonaws.com"
+            CustomOriginConfig: {OriginProtocolPolicy: https-only, OriginSSLProtocols: [TLSv1.2]}
+        DefaultCacheBehavior:
+          TargetOriginId: files
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD]
+          Compress: true
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+          ResponseHeadersPolicyId: !Ref WebHeaders
+        CacheBehaviors:
+          - PathPattern: "/api/*"
+            TargetOriginId: api
+            ViewerProtocolPolicy: https-only
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, PATCH, POST, DELETE]
+            CachedMethods: [GET, HEAD]
+            CachePolicyId: !Ref NoApiCache
+            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+            ResponseHeadersPolicyId: !Ref WebHeaders
+  WebPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WebFiles
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: cloudfront.amazonaws.com}
+            Action: s3:GetObject
+            Resource: !Sub "${WebFiles.Arn}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Website}"
+                AWS:SourceAccount: !Ref AWS::AccountId
+          - Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource: [!GetAtt WebFiles.Arn, !Sub "${WebFiles.Arn}/*"]
+            Condition: {Bool: {aws:SecureTransport: false}}
+Outputs:
+  WebsiteUrl: {Value: !Sub "https://${Website.DomainName}"}
+  WebBucket: {Value: !Ref WebFiles}
+  DistributionId: {Value: !Ref Website}
+  UserPoolId: {Value: !Ref Users}
+  ClientId: {Value: !Ref BrowserClient}
+  LoginUrl: {Value: !Sub "https://${LoginDomain}.auth.${AWS::Region}.amazoncognito.com"}
+  ApiUrl: {Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com"}
+  StateTable: {Value: !Ref State}
+  QueueUrl: {Value: !Ref Jobs}

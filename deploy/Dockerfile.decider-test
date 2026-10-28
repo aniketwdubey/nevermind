@@ -1,0 +1,30 @@
+FROM public.ecr.aws/docker/library/python:3.12-slim-trixie AS builder
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH" PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
+RUN pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu
+RUN git clone https://github.com/Vivek0712/strands-decider-agentcore.git /sample \
+    && cd /sample && git checkout f9691ee9b2891ecb72308377947e4d655f07bde5
+RUN printf 'torch==2.8.0\nhuggingface-hub==2.3.0\nhttpx2==2.16.0\n' >/tmp/constraints.txt \
+    && pip install -c /tmp/constraints.txt -r /sample/runtime/requirements.txt \
+       'strands-decider @ git+https://github.com/strands-labs/strands-decider@3e94e9d84c620ed5a95f1a3310c3decb971e261c'
+# Refuse oversized evidence instead of silently shortening it in the upstream sample.
+RUN python -c 'from pathlib import Path; p=Path("/sample/runtime/decider_runtime/engine.py"); s=p.read_text(); old="model_name=self.settings.display_name))"; assert s.count(old)==1; p.write_text(s.replace(old, "model_name=self.settings.display_name, strict_window=True))"))'
+RUN python -c 'from pathlib import Path; p=Path("/sample/runtime/decider_runtime/engine.py"); s=p.read_text(); old="from huggingface_hub import snapshot_download"; assert s.count(old)==1; p.write_text(s.replace(old, "from runtime_downloads import snapshot_download"))'
+
+FROM public.ecr.aws/docker/library/python:3.12-slim-trixie
+ENV PATH="/opt/venv/bin:$PATH" PYTHONUNBUFFERED=1 HF_HOME=/tmp/hf \
+    HF_HUB_DISABLE_TELEMETRY=1 TOKENIZERS_PARALLELISM=false \
+    MALLOC_ARENA_MAX=2 MALLOC_MMAP_THRESHOLD_=1048576 MALLOC_TRIM_THRESHOLD_=1048576
+RUN useradd -m -u 1000 bedrock_agentcore && mkdir -p /tmp/hf \
+    && chown bedrock_agentcore:bedrock_agentcore /tmp/hf
+COPY --from=builder /opt/venv /opt/venv
+WORKDIR /app
+COPY --from=builder --chown=bedrock_agentcore:bedrock_agentcore /sample/runtime/main.py ./
+COPY --from=builder --chown=bedrock_agentcore:bedrock_agentcore /sample/runtime/decider_runtime ./decider_runtime
+COPY --from=builder /sample/LICENSE /usr/share/doc/nevermind-decider-test/LICENSE.upstream
+COPY --chown=bedrock_agentcore:bedrock_agentcore runtime_downloads.py ./runtime_downloads.py
+USER bedrock_agentcore
+EXPOSE 8080
+CMD ["python", "main.py"]

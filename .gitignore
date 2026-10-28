@@ -1,0 +1,49 @@
+# Local credentials and environment values
+.env
+.env.*
+!.env.example
+!.env.*.example
+.aws/
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Python environments and generated files
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# JavaScript dependencies and build output
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Runtime state, downloaded models, and raw recordings belong here
+/.local/
+.cache/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.log
+
+# Local research and agent handoff notes if copied into the app by mistake
+/research/
+/CONTEXT.md
+.copilot/
+
+# Machine-specific files
+.DS_Store
+.idea/

@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nevermind"
+version = "0.1.0"
+description = "Review and repair a workshop plan when your goal changes."
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "uvicorn>=0.34,<1",
+  "httpx>=0.28,<1",
+  "pydantic>=2.10,<3",
+  "pydantic-settings>=2.7,<3",
+  "boto3>=1.40,<2",
+  "mangum>=0.19,<1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10", "ruff>=0.11,<1", "mypy>=1.15,<2", "boto3-stubs[bedrock-runtime,bedrock-agentcore,dynamodb,sqs]>=1.40,<2", "moto[dynamodb,sqs]>=5,<6", "cfn-lint>=1,<2", "pip-tools>=7.5,<8", "httpx2==2.16.0", "huggingface-hub==2.3.0"]
+
+[tool.setuptools.packages.find]
+where = ["backend"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["backend"]
+plugins = ["pydantic.mypy"]
