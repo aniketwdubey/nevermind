@@ -6,6 +6,8 @@ Nevermind is an experimental workshop assistant, started for the AWS Agent Exper
 
 **Real model calls, simulated effects.** The six prepared resources are synthetic fixtures. Room holds, drafts, and sent messages live in the sandbox database; there are no external booking or email integrations.
 
+![Nevermind public landing page](docs/images/landing.png)
+
 ## The demonstration
 
 1. Load the prepared in-person Python workshop.
@@ -16,14 +18,24 @@ Nevermind is an experimental workshop assistant, started for the AWS Agent Exper
 
 Also try **"What if we made it online?"** and **"Make it online, but keep the room for local attendees."** Hypotheticals cannot be applied. Uncertain model decisions require clarification instead of silently authorizing a change.
 
+See the [recording guide](docs/demo.md) for a short demonstration sequence and safe screenshot capture. A public video has not been recorded yet.
+
 ## Status
 
-Verified on one AWS deployment with real Nova and Decider calls:
+Verified on AWS with real Nova and Decider calls, using an isolated synthetic workspace:
 
 - An uncertain review blocked approval and left the workspace unchanged.
 - "Make it online. Same date and time." produced a ready review. After approval, the room, invitation, and handouts moved to version 2; slides and the sponsor note stayed unchanged; the sent catering message remained with no cancellation requested.
+- Separate cancellation approval appended one message and preserved the original. Repeating either standard approval or cancellation had no duplicate effect.
+- A hypothetical review could not be applied. Wrong preview hashes, premature cancellation, and a preview invalidated by resetting the workspace were rejected without changing the workspace or history.
+- These acceptance checks used the actual Cognito hosted authorization-code flow with PKCE and the public JWT-protected API, not an administrator-invoked Lambda event. They are API-level checks, not a claim that every browser interaction has been verified.
 
-Not yet verified live: the separate cancellation approval, the hypothetical request, and the keep-the-room request. These paths are covered by automated tests with synthetic model responses only.
+Model confidence remains input-sensitive. The first keep-room review preserved the room and catering but blocked approval on uncertainty about the invitation and materials. The requirement description was clarified to distinguish optional local attendance from required travel and to state that remote attendees receive digital materials. The threshold was not lowered.
+
+- With the clarified input, the keep-room review and approval passed on the infrastructure-managed runtime: invitation and handouts updated; room, catering, slides, and sponsor remained unchanged.
+- The new runtime was built and deployed from the checked-in templates and scripts. Real inference and a repeat deployment were verified before connecting the application.
+
+These are small acceptance checks, not an accuracy benchmark. The confidence threshold has not been calibrated on a representative dataset.
 
 ## Model responsibilities
 
@@ -66,11 +78,12 @@ python3.12 -m venv .venv
 .venv/bin/pip install --require-hashes -r requirements-dev.lock
 .venv/bin/pip install --no-deps -e .
 
-.venv/bin/ruff check backend tests deploy/web_config.py examples
-.venv/bin/ruff format --check backend tests deploy/web_config.py examples
-.venv/bin/mypy backend
+.venv/bin/ruff check backend tests deploy examples
+.venv/bin/ruff format --check backend tests deploy examples
+.venv/bin/mypy backend deploy/runtime_source.py
 .venv/bin/pytest -q
-.venv/bin/cfn-lint --regions us-east-1 --template deploy/app.yaml
+.venv/bin/cfn-lint --regions us-east-1 --template deploy/app.yaml deploy/runtime-build.yaml deploy/runtime.yaml
+for script in deploy/*.sh; do bash -n "$script"; done
 
 cd frontend
 npm ci
@@ -90,25 +103,37 @@ The image also uses [runtime_downloads.py](deploy/runtime_downloads.py) for at m
 
 ### Decider runtime setup
 
-The runtime was created once with the AWS SDK; this repository does not include a script for it. The tested configuration was:
+Install [CloudFormation Guard](https://github.com/aws-cloudformation/cloudformation-guard) and make `cfn-guard` available on `PATH`. The following command provisions billable AWS resources; use it only in an approved account. The demonstrated region is `us-east-1`.
 
-1. Build `deploy/Dockerfile.decider-test` for `linux/arm64` (for example, in an ARM CodeBuild project with privileged mode) and push it to a private ECR repository with immutable tags.
-2. Create an execution role trusted by `bedrock-agentcore.amazonaws.com` (scoped with `aws:SourceAccount` and `aws:SourceArn`) that can only pull that repository and write `/aws/bedrock-agentcore/*` logs.
-3. Create the AgentCore runtime with the container image, `serverProtocol: HTTP`, `idleRuntimeSessionTimeout: 60`, `maxLifetime: 1800`, and these environment variables:
+```bash
+export AWS_PROFILE=your-project-profile
+export AWS_REGION=us-east-1
 
-   | Variable | Value |
-   |---|---|
-   | `DECIDER_MODEL` | `StrandsAgents/strands-decider-2B-qwen3.5-v1-2610` |
-   | `DECIDER_REVISION` | `216d1ccb46a9e9b036eb9187b248db98480f77d4` |
-   | `DECIDER_QUANT` | `int8` |
-   | `DECIDER_MAX_TOKENS` | `2048` |
-   | `DECIDER_MAX_QUESTIONS` | `8` |
-   | `DECIDER_MAX_BATCH` | `1` |
-   | `DECIDER_THREADS` | `2` |
-   | `DECIDER_WARMUP` | `1` |
-   | `DECIDER_LOAD_TIMEOUT_S` | `600` |
+bash deploy/runtime.sh
+```
 
-4. Create a runtime endpoint named `probe` (the default qualifier used by the application) and pass the runtime ARN to the deployment below.
+The script deploys two separate CloudFormation stacks:
+
+- [runtime-build.yaml](deploy/runtime-build.yaml): private versioned source bucket, private immutable ECR repository, encrypted three-day logs, and a bounded ARM64 CodeBuild project. Docker and model weights are not installed locally.
+- [runtime.yaml](deploy/runtime.yaml): scoped execution role, HTTP AgentCore runtime, encrypted three-day logs, and a `probe` endpoint pointing to the deployed version. Inbound requests use IAM authentication; unsigned inference is rejected. `PUBLIC` is the development runtime's networking mode, not permission for anonymous inference.
+
+Only the Dockerfile, download helper, and build specification enter the source archive. Its content hash identifies an immutable image tag; repeat deployment reuses an existing image. Images are deployed by digest. The script prints change sets and refuses resource deletions or replacements; inspect those manually instead. Build time, network retries, and session lifetime are bounded.
+
+Defaults are `NEVERMIND_RUNTIME_STACK=nevermind-model` and `NEVERMIND_RUNTIME_NAME=nevermind_decider`. Set both to unique names for a separate environment. Outputs and build records go to ignored `.local/runtime/`. Do not reuse the script to adopt a runtime created outside its stacks.
+
+The pinned model revision, int8 compression, strict 2,048-token context window, 60-second idle timeout, and 1,800-second maximum session lifetime are explicit in the template. Do not silently relax these settings to conceal model failures.
+
+An actual ARM64 build, runtime creation, signed inference, unsigned-request rejection, and no-change repeat deployment were tested. This is reproducible demonstration infrastructure, not a fully locked or production-hardened model supply chain: the base image tag and some upstream transitive dependencies can still change across fresh builds.
+
+Read the runtime ARN from the script's output and check inference before connecting the app:
+
+```bash
+export NEVERMIND_RUNTIME_ARN=your-agentcore-runtime-arn
+AWS_DEFAULT_REGION=us-east-1 .venv/bin/python examples/check_change.py \
+  --runtime-arn "$NEVERMIND_RUNTIME_ARN"
+```
+
+### Application deployment
 
 ```bash
 export AWS_PROFILE=your-project-profile
@@ -183,6 +208,8 @@ There is no always-running EC2 or SageMaker host in this architecture. AgentCore
 Worker sessions are stopped after analysis, with a runtime idle timeout as a backup. Keep website assets available for the demo, but do not retain active model sessions just to keep the page online.
 
 Before deleting infrastructure, export any results you need and inspect retained resources. DynamoDB, Cognito users, the website bucket, the log key, the artifact bucket, and the separately deployed AgentCore resources may remain and incur charges. Delete them only after explicitly deciding that their data is no longer needed.
+
+For the managed runtime deployment, delete the runtime stack before the build stack, and retain the log key while encrypted logs exist. The build bucket, image repository, and log key deliberately survive stack deletion. Inspect and remove retained objects, versions, images, and keys separately only after approving their disposal. Account-wide bills can contain unrelated projects; do not treat all resources as Nevermind cleanup targets.
 
 ## License
 

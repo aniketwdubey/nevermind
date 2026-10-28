@@ -14,11 +14,12 @@ jobs:
           cache-dependency-path: requirements-dev.lock
       - run: pip install --require-hashes -r requirements-dev.lock
       - run: pip install --no-deps -e .
-      - run: ruff check backend tests deploy/web_config.py examples
-      - run: ruff format --check backend tests deploy/web_config.py examples
-      - run: mypy backend
+      - run: ruff check backend tests deploy examples
+      - run: ruff format --check backend tests deploy examples
+      - run: mypy backend deploy/runtime_source.py
       - run: pytest -q
-      - run: cfn-lint --regions us-east-1 --template deploy/app.yaml
+      - run: cfn-lint --regions us-east-1 --template deploy/app.yaml deploy/runtime-build.yaml deploy/runtime.yaml
+      - run: for script in deploy/*.sh; do bash -n "$script"; done
   frontend:
     runs-on: ubuntu-latest
     defaults:

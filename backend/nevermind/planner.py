@@ -45,7 +45,9 @@ def requirement_summary(goal: Goal, dependencies: list[str]) -> str:
         sentences = ["The workshop is online only. No attendees travel to the physical venue."]
     elif goal.delivery == "online":
         sentences = [
-            "The workshop is online, with a retained room for local attendees to join together."
+            "The workshop is online. Attendees can join remotely without travelling to the venue. "
+            "A room is retained for local attendees who choose to join together. "
+            "Remote attendees receive the workshop materials digitally, not in person."
         ]
     elif goal.delivery == "hybrid":
         sentences = ["The workshop has both online and in-person attendees."]

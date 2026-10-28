@@ -136,7 +136,9 @@ def test_decider_requirement_retains_explicit_local_room():
     state = prepared_workshop()
     goal = state.goal.model_copy(update={"delivery": "online", "room_required": True})
     summary = requirement_summary(goal, state.resources[0].depends_on)
-    assert "retained room for local attendees" in summary
+    assert "A room is retained for local attendees" in summary
+    assert "Attendees can join remotely without travelling to the venue" in summary
+    assert "Remote attendees receive the workshop materials digitally, not in person" in summary
     assert "Room 42" in summary
     assert "No attendees travel" not in summary
 

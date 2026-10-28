@@ -1,0 +1,12 @@
+version: 0.2
+phases:
+  pre_build:
+    commands:
+      - set -eu
+      - aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$REGISTRY"
+  build:
+    commands:
+      - docker build --platform linux/arm64 -t "$IMAGE_URI" .
+      - test "$(docker inspect "$IMAGE_URI" --format '{{.Architecture}}')" = arm64
+      - docker run --rm --entrypoint python "$IMAGE_URI" -c 'import torch, strands_decider, bedrock_agentcore; print(torch.__version__)'
+      - docker push "$IMAGE_URI"
