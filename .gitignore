@@ -27,6 +27,7 @@ node_modules/
 dist/
 coverage/
 *.tsbuildinfo
+cdk.out/
 
 # Runtime state, downloaded models, and raw recordings belong here
 /.local/

@@ -1,0 +1,10 @@
+{
+  "app": "../.venv/bin/python app.py",
+  "output": "../.local/cdk.out",
+  "versionReporting": false,
+  "pathMetadata": false,
+  "assetMetadata": false,
+  "context": {
+    "@aws-cdk/core:checkSecretUsage": true
+  }
+}

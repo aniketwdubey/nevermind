@@ -1,0 +1,3 @@
+# CDK's built-in S3 cleanup provider repeats an IAM role dependency already implied by GetAtt.
+ignore_checks:
+  - W3005

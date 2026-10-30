@@ -24,7 +24,8 @@ dev = ["pytest>=8,<10", "ruff>=0.11,<1", "mypy>=1.15,<2", "boto3-stubs[bedrock-r
 where = ["backend"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "infra/tests"]
+pythonpath = ["infra"]
 
 [tool.ruff]
 target-version = "py312"

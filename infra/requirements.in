@@ -1,0 +1,7 @@
+aws-cdk-lib==2.275.0
+constructs>=10.3,<11
+cdk-nag>=2.37,<3
+boto3-stubs[bedrock-agentcore-control,cloudformation,codebuild,cloudfront,ecr,logs,s3,ssm,sts]==1.43.118
+# Keep the shared environment compatible with the backend's locked botocore.
+botocore-stubs==1.43.118
+python-dateutil==2.9.0.post0

@@ -7,13 +7,13 @@ rule private_buckets when %buckets !empty {
         RestrictPublicBuckets == true
     }
     %buckets.Properties.BucketEncryption exists
-    %buckets.DeletionPolicy == 'Retain'
+    %buckets.DeletionPolicy == 'Delete'
 }
 let tables = Resources.*[ Type == 'AWS::DynamoDB::Table' ]
 rule durable_encrypted_state when %tables !empty {
     %tables.Properties.SSESpecification.SSEEnabled == true
     %tables.Properties.PointInTimeRecoverySpecification.PointInTimeRecoveryEnabled == true
-    %tables.DeletionPolicy == 'Retain'
+    %tables.DeletionPolicy == 'Delete'
     %tables.UpdateReplacePolicy == 'Retain'
 }
 let routes = Resources.*[ Type == 'AWS::ApiGatewayV2::Route' ]

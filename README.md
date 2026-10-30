@@ -34,6 +34,8 @@ Model confidence remains input-sensitive. The first keep-room review preserved t
 
 - With the clarified input, the keep-room review and approval passed on the infrastructure-managed runtime: invitation and handouts updated; room, catering, slides, and sponsor remained unchanged.
 - The new runtime was built and deployed from the checked-in templates and scripts. Real inference and a repeat deployment were verified before connecting the application.
+- The running deployment was subsequently migrated in place to Python CDK. All original physical resource IDs and stored workshop records were preserved; sign-in/API access and real Decider inference were checked again afterward.
+- CDK reported no pending template differences. Drift detection found none among supported resources; some resource types are not checked. Disposable destruction settings are tested with synthesized-template assertions and mocked lifecycle tests, not a live destroy/recreate cycle.
 
 These are small acceptance checks, not an accuracy benchmark. The confidence threshold has not been calibrated on a representative dataset.
 
@@ -71,18 +73,20 @@ Each Cognito user has a separate sandbox. Public registration is disabled. The A
 
 ## Setup and checks
 
-Requirements: Python 3.12, Node.js 22.12+ or a compatible newer version, npm, and AWS CLI v2.
+Requirements: Python 3.12, npm, AWS CLI v2, and Make. Infrastructure tooling installs a pinned workspace-local Node 22 binary.
 
 ```bash
 python3.12 -m venv .venv
 .venv/bin/pip install --require-hashes -r requirements-dev.lock
 .venv/bin/pip install --no-deps -e .
+make cdk-install
 
-.venv/bin/ruff check backend tests deploy examples
-.venv/bin/ruff format --check backend tests deploy examples
-.venv/bin/mypy backend deploy/runtime_source.py
+.venv/bin/ruff check backend tests deploy infra examples
+.venv/bin/ruff format --check backend tests deploy infra examples
+.venv/bin/mypy backend deploy/runtime_source.py infra
 .venv/bin/pytest -q
-.venv/bin/cfn-lint --regions us-east-1 --template deploy/app.yaml deploy/runtime-build.yaml deploy/runtime.yaml
+make cdk-synth
+.venv/bin/cfn-lint --regions us-east-1 --template .local/cdk.out/Application.template.json .local/cdk.out/Build.template.json .local/cdk.out/Runtime.template.json
 for script in deploy/*.sh; do bash -n "$script"; done
 
 cd frontend
@@ -93,63 +97,37 @@ npm run build
 
 Tests use Moto and synthetic model responses to check execution rules; these tests do not establish real-model accuracy. Real-model checks must be reported separately.
 
-## Deploy
+## Deploy with Python CDK
 
 Use a project-specific AWS profile locally. Never place access keys in the repository or browser. Lambda uses execution roles.
 
-The application template expects an existing IAM-authenticated Decider AgentCore runtime with the HTTP protocol. [This upstream hosting example](https://github.com/Vivek0712/strands-decider-agentcore) demonstrates the model-compression approach. The test image in [deploy/Dockerfile.decider-test](deploy/Dockerfile.decider-test) pins its sources, preserves the upstream license, and enables strict context-window rejection. It is not a general production model server.
-
-The image also uses [runtime_downloads.py](deploy/runtime_downloads.py) for at most three attempts on transient download transport failures or selected retryable HTTP statuses. Invalid model names and authorization failures are not retried. Exhausted attempts remain visible failures; no model decision is replaced or fabricated.
-
-### Decider runtime setup
-
-Install [CloudFormation Guard](https://github.com/aws-cloudformation/cloudformation-guard) and make `cfn-guard` available on `PATH`. The following command provisions billable AWS resources; use it only in an approved account. The demonstrated region is `us-east-1`.
+After setup, install frontend dependencies once with `cd frontend && npm ci && cd ..`, then:
 
 ```bash
 export AWS_PROFILE=your-project-profile
 export AWS_REGION=us-east-1
 
-bash deploy/runtime.sh
+make cdk-diff
+make cdk-deploy
+make cdk-outputs
 ```
 
-The script deploys two separate CloudFormation stacks:
+For an account/region without CDK bootstrap resources, review and run `make cdk-bootstrap` first. Do not delete or blindly modify shared bootstrap resources.
 
-- [runtime-build.yaml](deploy/runtime-build.yaml): private versioned source bucket, private immutable ECR repository, encrypted three-day logs, and a bounded ARM64 CodeBuild project. Docker and model weights are not installed locally.
-- [runtime.yaml](deploy/runtime.yaml): scoped execution role, HTTP AgentCore runtime, encrypted three-day logs, and a `probe` endpoint pointing to the deployed version. Inbound requests use IAM authentication; unsigned inference is rejected. `PUBLIC` is the development runtime's networking mode, not permission for anonymous inference.
+The [Python CDK application](infra/app.py) manages three stacks: build/image storage, AgentCore model hosting, and the website/application. `make cdk-deploy` builds or reuses the model image, packages Lambda code, deploys the runtime and application, and publishes the frontend. It prepares and checks each change set before execution and refuses resource removal or possible replacement.
 
-Only the Dockerfile, download helper, and build specification enter the source archive. Its content hash identifies an immutable image tag; repeat deployment reuses an existing image. Images are deployed by digest. The script prints change sets and refuses resource deletions or replacements; inspect those manually instead. Build time, network retries, and session lifetime are bounded.
+`NEVERMIND_PROJECT` defaults to `nevermind`; set it consistently for an independent deployment. The demonstrated region is `us-east-1`. Native CDK definitions replace the old standalone YAML deployment templates. See [infra/README.md](infra/README.md) for all commands, migration safeguards, and destruction behavior.
 
-Defaults are `NEVERMIND_RUNTIME_STACK=nevermind-model` and `NEVERMIND_RUNTIME_NAME=nevermind_decider`. Set both to unique names for a separate environment. Outputs and build records go to ignored `.local/runtime/`. Do not reuse the script to adopt a runtime created outside its stacks.
+Model hosting still uses a private immutable ECR repository and bounded ARM64 CodeBuild, not local Docker or downloaded local weights. The runtime has IAM-authenticated HTTP invocation, a pinned model revision, int8 compression, strict 2,048-token context rejection, a 60-second idle timeout, and a 1,800-second maximum session lifetime. `PUBLIC` is its development networking mode, not anonymous inference permission.
 
-The pinned model revision, int8 compression, strict 2,048-token context window, 60-second idle timeout, and 1,800-second maximum session lifetime are explicit in the template. Do not silently relax these settings to conceal model failures.
+[This upstream hosting example](https://github.com/Vivek0712/strands-decider-agentcore) supplies the model-compression approach. [Dockerfile.decider-test](deploy/Dockerfile.decider-test) pins its sources and preserves the upstream license. The image's [download helper](deploy/runtime_downloads.py) makes at most three attempts for transient transport errors or selected retryable statuses. Exhausted failures remain visible. No decision is fabricated.
 
-An actual ARM64 build, runtime creation, signed inference, unsigned-request rejection, and no-change repeat deployment were tested. This is reproducible demonstration infrastructure, not a fully locked or production-hardened model supply chain: the base image tag and some upstream transitive dependencies can still change across fresh builds.
+Model images are deployed by digest, but the base image tag and some upstream transitive dependencies can still change across fresh builds. This is demonstration infrastructure, not a production-hardened model supply chain.
 
-Read the runtime ARN from the script's output and check inference before connecting the app:
-
-```bash
-export NEVERMIND_RUNTIME_ARN=your-agentcore-runtime-arn
-AWS_DEFAULT_REGION=us-east-1 .venv/bin/python examples/check_change.py \
-  --runtime-arn "$NEVERMIND_RUNTIME_ARN"
-```
-
-### Application deployment
+`cdk-nag` runs during strict synthesis. [security.guard](deploy/security.guard) provides additional checks on the synthesized JSON if you install CloudFormation Guard:
 
 ```bash
-export AWS_PROFILE=your-project-profile
-export AWS_REGION=us-east-1
-export NEVERMIND_RUNTIME_ARN=your-agentcore-runtime-arn
-
-bash deploy/package.sh
-bash deploy/deploy.sh
-```
-
-The deployment creates an invite-only Cognito login, private website bucket, CloudFront distribution, JWT-protected API, two Lambda functions, a job queue and failure queue, encrypted logs, and a DynamoDB table. It does not create public registration or anonymous model access.
-
-CloudFormation change-set validation and local schema validation run before execution. [deploy/security.guard](deploy/security.guard) provides additional CloudFormation Guard rules. Install the official Guard tool separately to run them:
-
-```bash
-cfn-guard validate --rules deploy/security.guard --data deploy/app.yaml --output-format json
+cfn-guard validate --rules deploy/security.guard --data .local/cdk.out/Application.template.json --output-format json
 ```
 
 Create invited users through Cognito administration. Use an independently chosen password or a locally generated one; do not include credentials in source, screenshots, logs, or the demo video. The browser uses Cognito's hosted authorization-code flow with PKCE and keeps access tokens in memory, not localStorage.
@@ -161,7 +139,7 @@ AWS_PROFILE=your-project-profile AWS_DEFAULT_REGION=us-east-1 \
 
 The generated password is saved only in `.local/deploy/login-owner.json`, with owner-only file permissions. Omit `--generate` to enter a password interactively instead. This command refuses to overwrite an existing local credential file.
 
-Runtime deployment output and frontend configuration are written under ignored `.local/deploy/`. `clientId` and login URLs are public configuration, not credentials.
+CDK templates and build/deployment records stay under ignored `.local/`; the invite helper and frontend configuration still use `.local/deploy/`. `clientId` and login URLs are public configuration, not credentials.
 
 ## Reusable decision pattern: `semantic_change_impact`
 
@@ -194,7 +172,7 @@ The confidence threshold of 0.70 is a conservative initial setting, **not a cali
 - Standard updates and their history event commit together. Cancellation is a separate transaction that appends a message.
 - Repeated apply requests return the already-persisted outcome without repeating effects.
 - A reset invalidates old previews. Hypothetical previews are never executable.
-- Runs expire after seven days. DynamoDB point-in-time recovery is enabled; workspace and history storage are retained when the stack is removed.
+- Runs expire after seven days. DynamoDB point-in-time recovery is enabled while the table exists; confirmed destruction deletes the disposable workshop table.
 - Model errors remain visible. No keyword heuristic or canned response is substituted for failed inference.
 - Generated content is rendered as text, not HTML.
 - CPU inference is not subsecond: initial feasibility measurements were roughly 43-62 seconds on first use, around seven seconds for individual warm checks, and 30-33 seconds for six related checks. These are small experiments on one deployment, not service guarantees.
@@ -207,9 +185,9 @@ There is no always-running EC2 or SageMaker host in this architecture. AgentCore
 
 Worker sessions are stopped after analysis, with a runtime idle timeout as a backup. Keep website assets available for the demo, but do not retain active model sessions just to keep the page online.
 
-Before deleting infrastructure, export any results you need and inspect retained resources. DynamoDB, Cognito users, the website bucket, the log key, the artifact bucket, and the separately deployed AgentCore resources may remain and incur charges. Delete them only after explicitly deciding that their data is no longer needed.
+`make cdk-destroy` requires an exact account/project confirmation. It deletes the managed demo's workshop data, users, logs, files, and images, then schedules encryption keys for deletion after seven days. Redeploy starts fresh; data and login accounts are not restored, and the URL may change. Export anything you need first.
 
-For the managed runtime deployment, delete the runtime stack before the build stack, and retain the log key while encrypted logs exist. The build bucket, image repository, and log key deliberately survive stack deletion. Inspect and remove retained objects, versions, images, and keys separately only after approving their disposal. Account-wide bills can contain unrelated projects; do not treat all resources as Nevermind cleanup targets.
+Shared CDK bootstrap resources and legacy resources from before this migration are outside that command. The old experimental runtime, old repository/log key, and old unmanaged application artifact bucket need separate reviewed cleanup. Do not promise zero charges after deleting only the three managed stacks, and never treat unrelated projects as cleanup targets.
 
 ## License
 

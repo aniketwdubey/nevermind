@@ -1,0 +1,12 @@
+{
+  "name": "nevermind-infrastructure",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "cdk": "cdk"
+  },
+  "devDependencies": {
+    "aws-cdk": "2.1146.1",
+    "node": "22.23.4"
+  }
+}

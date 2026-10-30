@@ -11,14 +11,24 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: requirements-dev.lock
+          cache-dependency-path: |
+            requirements-dev.lock
+            infra/requirements.lock
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: infra/package-lock.json
       - run: pip install --require-hashes -r requirements-dev.lock
+      - run: pip install --require-hashes -r infra/requirements.lock
       - run: pip install --no-deps -e .
-      - run: ruff check backend tests deploy examples
-      - run: ruff format --check backend tests deploy examples
-      - run: mypy backend deploy/runtime_source.py
+      - run: npm ci --prefix infra
+      - run: ruff check backend tests deploy infra examples
+      - run: ruff format --check backend tests deploy infra examples
+      - run: mypy backend deploy/runtime_source.py infra
       - run: pytest -q
-      - run: cfn-lint --regions us-east-1 --template deploy/app.yaml deploy/runtime-build.yaml deploy/runtime.yaml
+      - run: make cdk-synth
+      - run: cfn-lint --regions us-east-1 --template .local/cdk.out/Application.template.json .local/cdk.out/Build.template.json .local/cdk.out/Runtime.template.json
       - run: for script in deploy/*.sh; do bash -n "$script"; done
   frontend:
     runs-on: ubuntu-latest
