@@ -19,6 +19,9 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: infra/package-lock.json
+      - run: |
+          python -m venv .venv
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
       - run: pip install --require-hashes -r requirements-dev.lock
       - run: pip install --require-hashes -r infra/requirements.lock
       - run: pip install --no-deps -e .
