@@ -68,7 +68,9 @@ Confirmed destruction removes the three stacks and their workshop state, invited
 
 Creating the app again starts with empty state and new login accounts. The website address may change. It does not restore old data. Keep any desired export before confirming destruction.
 
-The shared CDK bootstrap is intentionally outside this operation. Legacy resources created before the managed stacks—such as the original experimental runtime, repository, log key, and old application artifact bucket—also require separate reviewed cleanup. No account-wide discovery/deletion or cleanup of other projects is performed.
+The shared CDK bootstrap is intentionally outside this operation. Resources created before the managed stacks—the original experimental runtime, repository, build project, roles, log key, and old application artifact bucket—were reviewed and removed separately. No account-wide discovery/deletion or cleanup of other projects is performed.
+
+Deployment passes each stack parameter with its own `--parameters` flag, keyed by CloudFormation stack name, and uses `--no-previous-parameters`. A missing value therefore fails the deployment instead of silently reusing a stale deployed value.
 
 ## Migration and checks
 

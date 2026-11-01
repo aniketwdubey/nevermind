@@ -45,7 +45,7 @@ def confirm_destroy(account: str, project: str) -> bool:
     expected = f"DELETE {account}/{project}"
     print(
         f"This deletes the {project} demo's workshop data, users, files, images and logs in account {account}.\n"
-        "It leaves the shared CDK bootstrap and any old unmanaged resources alone.\n"
+        "It leaves the shared CDK bootstrap and resources outside these stacks alone.\n"
         "Encryption keys enter a seven-day deletion waiting period.\n"
         f"To continue, type exactly: {expected}",
         flush=True,
@@ -143,10 +143,14 @@ class Deployment:
             "prepare-change-set",
             "--change-set-name",
             change_name,
+            # Fail on omitted parameters instead of silently reusing stale deployed values.
+            "--no-previous-parameters",
         ]
         if parameters:
-            args.append("--parameters")
-            args.extend(f"{name}:{key}={value}" for key, value in parameters.items())
+            # The CDK CLI keys per-stack parameters by CloudFormation stack name, not construct ID,
+            # and each --parameters flag accepts exactly one value.
+            for key, value in parameters.items():
+                args.extend(["--parameters", f"{self.stacks[name]}:{key}={value}"])
         self.cdk(*args)
         found: ChangeSetSummaryTypeDef | None = None
         for page in self.cf.get_paginator("list_change_sets").paginate(StackName=self.stacks[name]):

@@ -232,6 +232,25 @@ def test_evaluated_safe_change_is_executed_and_waited_for(tmp_path: Path) -> Non
         logs.assert_called_once_with("Application")
 
 
+def test_parameters_target_cloudformation_stack_name_without_stale_values() -> None:
+    deployment = object.__new__(Deployment)
+    deployment.stacks = {"Application": "example-app"}
+    deployment.cf = Mock()
+    deployment.cf.get_paginator.return_value.paginate.return_value = [{"Summaries": []}]
+    with (
+        patch.object(Deployment, "cdk") as cdk,
+        patch.object(Deployment, "bound_cleanup_logs"),
+    ):
+        deployment.deploy_stack(
+            "Application", {"CodeBucket": "managed-bucket", "CodeKey": "lambda/code.zip"}
+        )
+    args = list(cdk.call_args.args)
+    assert "--no-previous-parameters" in args
+    for value in ["example-app:CodeBucket=managed-bucket", "example-app:CodeKey=lambda/code.zip"]:
+        assert args[args.index(value) - 1] == "--parameters"
+    assert not any(arg.startswith("Application:") for arg in args)
+
+
 def test_infrastructure_and_backend_lock_shared_versions_match() -> None:
     root = Path(__file__).resolve().parents[2]
     pattern = re.compile(r"^([a-zA-Z0-9_-]+)(?:\[[^]]+\])?==([^\s]+)")

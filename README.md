@@ -187,7 +187,7 @@ Worker sessions are stopped after analysis, with a runtime idle timeout as a bac
 
 `make cdk-destroy` requires an exact account/project confirmation. It deletes the managed demo's workshop data, users, logs, files, and images, then schedules encryption keys for deletion after seven days. Redeploy starts fresh; data and login accounts are not restored, and the URL may change. Export anything you need first.
 
-Shared CDK bootstrap resources and legacy resources from before this migration are outside that command. The old experimental runtime, old repository/log key, and old unmanaged application artifact bucket need separate reviewed cleanup. Do not promise zero charges after deleting only the three managed stacks, and never treat unrelated projects as cleanup targets.
+Shared CDK bootstrap resources are outside that command. Resources from before the CDK migration—the experimental runtime, its repository, build project, roles, log key, and the unmanaged artifact bucket—were reviewed and removed separately. Do not promise zero charges after deleting the three managed stacks, and never treat unrelated projects as cleanup targets.
 
 ## License
 
