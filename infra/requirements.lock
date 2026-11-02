@@ -28,6 +28,7 @@ aws-cdk-lib==2.275.0 \
     # via
     #   -r infra/requirements.in
     #   cdk-nag
+    #   deploy-time-build
 boto3-stubs[bedrock-agentcore-control,cloudformation,cloudfront,codebuild,ecr,logs,s3,ssm,sts]==1.43.118 \
     --hash=sha256:11a39b22fabd4ac0532904b0522e7491cc54b1a710e04ead30711ceafda6ba4f \
     --hash=sha256:21c9fd6d24b99af97d5f04247b58b8072352f39d69233fe1c5f20676c5aa547b
@@ -53,6 +54,11 @@ constructs==10.8.1 \
     #   -r infra/requirements.in
     #   aws-cdk-lib
     #   cdk-nag
+    #   deploy-time-build
+deploy-time-build==0.4.10 \
+    --hash=sha256:86ce1ab37972a3f5c76765f8b06333d6326a92718c9e214d50c58a8e1af30f33 \
+    --hash=sha256:c3d753ff1153f3ec37f8305d9fd3f601908b482ded1ba1e50cb45ae785a5813e
+    # via -r infra/requirements.in
 jsii==1.142.0 \
     --hash=sha256:16d6b3e25bbaa081dd39eabe910b07f646fe4988302d8aae401690f247baf7df \
     --hash=sha256:2fe1c5f2a5a405a5fbaaafb8b362cdf6a30171589e508c01682f33c5d529172f
@@ -63,6 +69,7 @@ jsii==1.142.0 \
     #   aws-cdk-lib
     #   cdk-nag
     #   constructs
+    #   deploy-time-build
 mypy-boto3-bedrock-agentcore-control==1.43.120 \
     --hash=sha256:79d38171ace87ff0899888c3709fc0d63e89572d425bdcc03b9e4f2c4d8032a3 \
     --hash=sha256:8aaf4b5ff77f4eaccc69d754fcaf23f0ebf8712b7b2de6fc0456c5b4edc81828
@@ -109,6 +116,7 @@ publication==0.0.3 \
     #   aws-cdk-lib
     #   cdk-nag
     #   constructs
+    #   deploy-time-build
     #   jsii
 python-dateutil==2.9.0.post0 \
     --hash=sha256:37dd54208da7e1cd875388217d5e00ebd4179249f90fb72437e91a35459a0ad3 \
@@ -125,6 +133,7 @@ typeguard==2.13.3 \
     --hash=sha256:5e3e3be01e887e7eafae5af63d1f36c849aaa94e3a0112097312aabfa16284f1
     # via
     #   cdk-nag
+    #   deploy-time-build
     #   jsii
 types-s3transfer==0.19.3 \
     --hash=sha256:6843143f3b79e3cb73e58b6f45738e28e88d9f681fd32cc5ef7fa16f0c193356 \

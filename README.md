@@ -33,9 +33,7 @@ Verified on AWS with real Nova and Decider calls, using an isolated synthetic wo
 Model confidence remains input-sensitive. The first keep-room review preserved the room and catering but blocked approval on uncertainty about the invitation and materials. The requirement description was clarified to distinguish optional local attendance from required travel and to state that remote attendees receive digital materials. The threshold was not lowered.
 
 - With the clarified input, the keep-room review and approval passed on the infrastructure-managed runtime: invitation and handouts updated; room, catering, slides, and sponsor remained unchanged.
-- The new runtime was built and deployed from the checked-in templates and scripts. Real inference and a repeat deployment were verified before connecting the application.
-- The running deployment was subsequently migrated in place to Python CDK. All original physical resource IDs and stored workshop records were preserved; sign-in/API access and real Decider inference were checked again afterward.
-- CDK reported no pending template differences. Drift detection found none among supported resources; some resource types are not checked. Disposable destruction settings are tested with synthesized-template assertions and mocked lifecycle tests, not a live destroy/recreate cycle.
+- The deployment is defined in Python CDK. A fresh deployment with plain `cdk deploy` (model image built in CodeBuild during deployment, no customer-managed keys) passed signed Decider inference and a full authenticated review; CDK then reported no pending differences.
 
 These are small acceptance checks, not an accuracy benchmark. The confidence threshold has not been calibrated on a representative dataset.
 
@@ -83,10 +81,10 @@ make cdk-install
 
 .venv/bin/ruff check backend tests deploy infra examples
 .venv/bin/ruff format --check backend tests deploy infra examples
-.venv/bin/mypy backend deploy/runtime_source.py infra
+.venv/bin/mypy backend infra
 .venv/bin/pytest -q
 make cdk-synth
-.venv/bin/cfn-lint --regions us-east-1 --template .local/cdk.out/Application.template.json .local/cdk.out/Build.template.json .local/cdk.out/Runtime.template.json
+.venv/bin/cfn-lint --regions us-east-1 --template .local/cdk.out/Application.template.json .local/cdk.out/Runtime.template.json
 for script in deploy/*.sh; do bash -n "$script"; done
 
 cd frontend
@@ -107,22 +105,27 @@ After setup, install frontend dependencies once with `cd frontend && npm ci && c
 export AWS_PROFILE=your-project-profile
 export AWS_REGION=us-east-1
 
-make cdk-diff
-make cdk-deploy
-make cdk-outputs
+make cdk-diff      # preview changes
+make cdk-deploy    # build and deploy everything
+make cdk-outputs   # website and login details
 ```
 
-For an account/region without CDK bootstrap resources, review and run `make cdk-bootstrap` first. Do not delete or blindly modify shared bootstrap resources.
+For an account/region without CDK bootstrap resources, run `make cdk-bootstrap` once first. The bootstrap is shared by every CDK project in that account/region.
 
-The [Python CDK application](infra/app.py) manages three stacks: build/image storage, AgentCore model hosting, and the website/application. `make cdk-deploy` builds or reuses the model image, packages Lambda code, deploys the runtime and application, and publishes the frontend. It prepares and checks each change set before execution and refuses resource removal or possible replacement.
+`make cdk-deploy` packages the Lambda dependencies (`deploy/package.sh`), builds the website, then runs plain `cdk deploy --all`. The [Python CDK application](infra/app.py) has two stacks:
 
-`NEVERMIND_PROJECT` defaults to `nevermind`; set it consistently for an independent deployment. The demonstrated region is `us-east-1`. Native CDK definitions replace the old standalone YAML deployment templates. See [infra/README.md](infra/README.md) for all commands, migration safeguards, and destruction behavior.
+| Stack | Contents |
+|---|---|
+| `nevermind-model` | ARM64 Decider image built in AWS CodeBuild during deployment, its private image repository, and the IAM-authenticated HTTP AgentCore runtime |
+| `nevermind-app` | Website, invite-only login, JWT-protected API, Lambda API and worker, job queues and DynamoDB workshop state |
 
-Model hosting still uses a private immutable ECR repository and bounded ARM64 CodeBuild, not local Docker or downloaded local weights. The runtime has IAM-authenticated HTTP invocation, a pinned model revision, int8 compression, strict 2,048-token context rejection, a 60-second idle timeout, and a 1,800-second maximum session lifetime. `PUBLIC` is its development networking mode, not anonymous inference permission.
+No local Docker is needed: the [deploy-time-build](https://github.com/tmokmss/deploy-time-build) construct (MIT) uploads only the Dockerfile and its download helper, and CloudFormation waits for CodeBuild to push the image before creating or updating the runtime. CDK uploads the Lambda code and website as normal assets and generates the website's public sign-in settings (`config.json`). Always review `make cdk-diff` before deploying changes to a deployment holding data you care about.
 
-[This upstream hosting example](https://github.com/Vivek0712/strands-decider-agentcore) supplies the model-compression approach. [Dockerfile.decider-test](deploy/Dockerfile.decider-test) pins its sources and preserves the upstream license. The image's [download helper](deploy/runtime_downloads.py) makes at most three attempts for transient transport errors or selected retryable statuses. Exhausted failures remain visible. No decision is fabricated.
+`NEVERMIND_PROJECT` defaults to `nevermind`; set it consistently for an independent deployment. The demonstrated region is `us-east-1`. See [infra/README.md](infra/README.md) for details.
 
-Model images are deployed by digest, but the base image tag and some upstream transitive dependencies can still change across fresh builds. This is demonstration infrastructure, not a production-hardened model supply chain.
+The runtime has a pinned model revision, int8 compression, strict 2,048-token context rejection, a 60-second idle timeout, and a 1,800-second maximum session lifetime. `PUBLIC` is its development networking mode, not anonymous inference permission. [This upstream hosting example](https://github.com/Vivek0712/strands-decider-agentcore) supplies the model-compression approach. [Dockerfile.decider-test](deploy/Dockerfile.decider-test) pins its sources and preserves the upstream license. The image's [download helper](deploy/runtime_downloads.py) makes at most three attempts for transient transport errors or selected retryable statuses. Exhausted failures remain visible. No decision is fabricated.
+
+The base image tag and some upstream transitive dependencies can still change across fresh builds. This is demonstration infrastructure, not a production-hardened model supply chain.
 
 `cdk-nag` runs during strict synthesis. [security.guard](deploy/security.guard) provides additional checks on the synthesized JSON if you install CloudFormation Guard:
 
@@ -181,13 +184,11 @@ The confidence threshold of 0.70 is a conservative initial setting, **not a cali
 
 ## Costs and cleanup
 
-There is no always-running EC2 or SageMaker host in this architecture. AgentCore sessions, Bedrock tokens, Lambda, queues, API requests, database usage, storage, logs, and KMS can still incur charges. The configured limits are safeguards, not a hard billing cap.
+There is no always-running EC2 or SageMaker host in this architecture. AgentCore sessions, Bedrock tokens, Lambda, queues, API requests, database usage, storage, and logs can still incur charges. Data is encrypted with AWS default encryption; there are no customer-managed keys. The configured limits are safeguards, not a hard billing cap.
 
 Worker sessions are stopped after analysis, with a runtime idle timeout as a backup. Keep website assets available for the demo, but do not retain active model sessions just to keep the page online.
 
-`make cdk-destroy` requires an exact account/project confirmation. It deletes the managed demo's workshop data, users, logs, files, and images, then schedules encryption keys for deletion after seven days. Redeploy starts fresh; data and login accounts are not restored, and the URL may change. Export anything you need first.
-
-Shared CDK bootstrap resources are outside that command. Resources from before the CDK migration—the experimental runtime, its repository, build project, roles, log key, and the unmanaged artifact bucket—were reviewed and removed separately. Do not promise zero charges after deleting the three managed stacks, and never treat unrelated projects as cleanup targets.
+`make cdk-destroy` deletes both stacks, including workshop data, users, website files and model images. Redeploy starts fresh; data and login accounts are not restored, and the URL may change. Export anything you need first. The shared CDK bootstrap is not deleted. A few small log groups created automatically by AWS for deployment helpers (Lambda and CodeBuild) may remain afterwards; they can be deleted manually.
 
 ## License
 

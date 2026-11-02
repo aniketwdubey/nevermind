@@ -39,7 +39,7 @@ rule one_resource_per_queue_statement when %queue_policies !empty {
     %queue_policies.Properties.PolicyDocument.Statement[*].Resource is_struct
 }
 let logs = Resources.*[ Type == 'AWS::Logs::LogGroup' ]
-rule bounded_encrypted_logs when %logs !empty {
-    %logs.Properties.KmsKeyId exists
+# CloudWatch Logs encrypts log data at rest by default; logs must still expire.
+rule bounded_logs when %logs !empty {
     %logs.Properties.RetentionInDays <= 7
 }

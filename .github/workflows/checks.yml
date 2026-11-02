@@ -26,12 +26,13 @@ jobs:
       - run: pip install --require-hashes -r infra/requirements.lock
       - run: pip install --no-deps -e .
       - run: npm ci --prefix infra
+      - run: npm ci --prefix frontend
       - run: ruff check backend tests deploy infra examples
       - run: ruff format --check backend tests deploy infra examples
-      - run: mypy backend deploy/runtime_source.py infra
+      - run: mypy backend infra
       - run: pytest -q
       - run: make cdk-synth
-      - run: cfn-lint --regions us-east-1 --template .local/cdk.out/Application.template.json .local/cdk.out/Build.template.json .local/cdk.out/Runtime.template.json
+      - run: cfn-lint --regions us-east-1 --template .local/cdk.out/Application.template.json .local/cdk.out/Runtime.template.json
       - run: for script in deploy/*.sh; do bash -n "$script"; done
   frontend:
     runs-on: ubuntu-latest

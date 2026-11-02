@@ -1,85 +1,56 @@
 # Python CDK infrastructure
 
-The three stacks are native Python CDK code. The earlier standalone deployment templates are no longer a second source of truth.
+Nevermind is deployed with plain `cdk deploy`. There is no custom deployment script.
 
-| CDK stack ID | Default CloudFormation stack name | Responsibility |
+| CDK stack ID | CloudFormation stack | Contents |
 |---|---|---|
-| `Build` | `nevermind-model-build` | Private versioned build and Lambda artifact bucket, immutable model images, bounded ARM64 CodeBuild, encrypted logs |
-| `Runtime` | `nevermind-model` | IAM-authenticated HTTP Decider runtime and `probe` endpoint |
-| `Application` | `nevermind-app` | Invite-only website/API, Lambda worker, queues, DynamoDB workshop state |
+| `Runtime` | `nevermind-model` | Decider image build (AWS CodeBuild, ARM64), private image repository, AgentCore runtime and `probe` endpoint |
+| `Application` | `nevermind-app` | CloudFront website, Cognito login, HTTP API, Lambda API and worker, SQS queues, DynamoDB state |
 
-`Runtime` depends on `Build`, and `Application` depends on `Runtime`. Runtime/image values pass through explicit deployment parameters rather than permanent CloudFormation exports.
+`Application` reads the runtime ARN from `Runtime` through a CloudFormation export, so CDK deploys `Runtime` first. The runtime ARN stays the same when a new image is deployed; the runtime is updated in place.
 
-## Setup
+## Commands
 
-Run the root README's Python setup first, then from the repository root:
+From the repository root, after the Python setup in the main README:
 
 ```bash
-make cdk-install
+make cdk-install                      # locked CDK libraries, CLI and Node 22
 cd frontend && npm ci && cd ..
-```
+make cdk-test                         # offline template tests
 
-The infrastructure Python dependencies and CLI have separate lockfiles. The CLI uses a workspace-local Node 22 binary; it does not change the developer's global Node installation.
-
-```bash
-make cdk-test
-make cdk-synth
 export AWS_PROFILE=your-project-profile
 export AWS_REGION=us-east-1
-make cdk-diff
-make cdk-deploy
-make cdk-outputs
-make cdk-drift
+make cdk-bootstrap                    # once per account/region (shared by all CDK apps)
+make cdk-diff                         # preview changes
+make cdk-deploy                       # build and deploy everything
+make cdk-outputs                      # website and login details
+make cdk-drift                        # compare live resources with templates
+make cdk-destroy                      # delete both stacks and their data
 ```
 
-For a new account/region, review and run `make cdk-bootstrap` once. Bootstrap creates shared deployment roles and storage and needs elevated permissions. Do not delete or silently reconfigure an existing shared `CDKToolkit` stack.
+`make cdk-deploy` runs `deploy/package.sh` (hash-locked Lambda dependencies into `.local/lambda-package`), builds the website into `frontend/dist`, then runs `cdk deploy --all`. Both directories must exist for synthesis.
 
-`NEVERMIND_PROJECT` defaults to `nevermind`. Set it before all commands to deploy an independent environment. The supported region is currently `us-east-1`. The old independent stack-name/runtime-name overrides are rejected rather than silently mixing environments.
+`NEVERMIND_PROJECT` (default `nevermind`) names both stacks and the runtime; set it consistently for an independent environment.
 
-## Deployment and updates
+## How the pieces are built
 
-`make cdk-deploy` performs the complete sequence:
+- **Model image:** the [deploy-time-build](https://github.com/tmokmss/deploy-time-build) `ContainerImageBuild` construct (MIT, pinned in `requirements.in`) uploads only `deploy/Dockerfile.decider-test` and `deploy/runtime_downloads.py`, runs an ARM64 CodeBuild job during the deployment, and returns the image URI. The runtime depends on it, so AgentCore always receives a pushed image. No local Docker is required.
+- **Lambda code:** a normal CDK file asset uploaded to the bootstrap bucket. It only changes when the packaged files change.
+- **Website:** two CDK `BucketDeployment`s. Fingerprinted files under `assets/` are cached for a year; `index.html` and the generated `config.json` (public client ID and login URLs) are revalidated on every request and invalidated in CloudFront after each deployment.
 
-1. Prepare the CDK build-stack change set.
-2. Refuse any proposed resource removal or possible replacement before executing it.
-3. Package only the three reviewed model build inputs. Reuse an existing immutable image with that source hash, or build and push it on ARM64 CodeBuild.
-4. Deploy the runtime by image digest and confirm its endpoint is ready.
-5. Package hash-locked Lambda dependencies and application code. Store this archive in the managed build bucket, not an unmanaged artifact bucket.
-6. Deploy the application stack through the same change-set check.
-7. Build and upload the website and public login configuration, then invalidate the HTML/config cache.
+## Encryption and logs
 
-Failed commands stop the sequence with an error. Re-running can resume from successfully deployed stacks and reuses an existing model image. It does not repeat workshop approvals or model-driven effects.
+There are no customer-managed KMS keys. S3, DynamoDB, SQS and CloudWatch Logs use AWS default encryption at rest. Application and runtime log groups expire after three or seven days.
 
-The check requests AWS-evaluated property values; unresolved summary information can otherwise report conditional replacements for metadata-only changes. CDK prepares the change set, and the standard CloudFormation API executes that exact checked change set. This avoids a pinned CDK CLI rendering error on metadata-only execution without bypassing the replacement check.
+## Safety and checks
 
-For a runtime-only update, use `make -C infra runtime`. The earlier `deploy/runtime.sh` and `deploy/deploy.sh` commands forward to CDK; they no longer deploy independent YAML templates.
+- Existing logical resource IDs and name expressions are kept stable and covered by tests, because changing them would replace live resources.
+- `cdk diff` shows replacements before deployment. Review it whenever the deployment holds data you care about; `make cdk-deploy` does not stop for approval.
+- `cdk-nag` runs in strict synthesis. `nevermind_infra/compliance.py` documents each accepted finding, including findings in CDK and deploy-time-build helper resources.
+- `.cfnlintrc` ignores only W3005, a redundant-dependency style warning in CDK's bucket cleanup helper.
 
-Outputs, generated templates, asset copies, and change-set records stay under ignored `.local/`. `deploy/create_invite.py` consumes the latest application's output file, as before. No AWS credentials enter browser code or synthesis context.
+## Destruction
 
-## Disposable destruction
+`make cdk-destroy` deletes both stacks. Everything is disposable: the website bucket is emptied automatically, the image repository is emptied on deletion, and the workshop table and user pool are deleted. Redeploying starts with empty data, new login accounts and possibly a new website address.
 
-```bash
-make cdk-destroy
-```
-
-This prints the target account and project and requires typing `DELETE <account>/<project>` exactly. A missing or incorrect confirmation stops before calling CDK destruction.
-
-Confirmed destruction removes the three stacks and their workshop state, invited user accounts, messages, logs, website files, build inputs, and repository images. CDK's bucket-cleanup provider removes all object versions before bucket deletion. ECR is configured to empty images on deletion. The wrapper also deletes the cleanup providers' own log groups, using physical function IDs recorded from these stacks before destruction, never an account-wide name search. Those provider logs have seven-day retention while deployed. Encryption keys enter AWS's seven-day deletion waiting period; this is not immediate physical removal.
-
-Creating the app again starts with empty state and new login accounts. The website address may change. It does not restore old data. Keep any desired export before confirming destruction.
-
-The shared CDK bootstrap is intentionally outside this operation. Resources created before the managed stacks—the original experimental runtime, repository, build project, roles, log key, and old application artifact bucket—were reviewed and removed separately. No account-wide discovery/deletion or cleanup of other projects is performed.
-
-Deployment passes each stack parameter with its own `--parameters` flag, keyed by CloudFormation stack name, and uses `--no-previous-parameters`. A missing value therefore fails the deployment instead of silently reusing a stale deployed value.
-
-## Migration and checks
-
-Existing logical IDs, stack names, and CloudFormation expressions are deliberately preserved. Resource-level CDK constructs are used where higher-level defaults would change the existing deployment. Higher-level S3 constructs supply automatic cleanup; their resource and policy logical IDs are explicitly preserved.
-
-Tests assert stable logical IDs, protected API/auth settings, model limits, encrypted logs, disposable storage settings, and refusal of unsafe deployment/destruction. `cdk-nag` runs during strict synthesis. Resource-specific exceptions in `nevermind_infra/compliance.py` explain existing demonstration limitations rather than silently changing the Cognito plan, runtime version, website hostname, or logging behavior.
-
-CloudFormation schema linting and Guard can also inspect the synthesized templates. `.cfnlintrc` ignores only W3005, the redundant-dependency style rule triggered by CDK's built-in cleanup provider.
-
-A CDK diff is not permission to delete or replace data. Deployment still reviews the actual prepared change set. A live destroy/recreate cycle requires separate approval; an in-place migration alone does not establish that it has been tested.
-
-The existing deployment was migrated in place and all original physical IDs and workshop records were verified unchanged. Post-migration hosted sign-in/API access and signed Decider inference succeeded. The final template diff was empty, and live drift detection reported zero drift with nine unsupported resources unchecked. No live destruction was performed.
+The shared CDK bootstrap is not deleted. A few small log groups that AWS creates automatically for deployment helpers (Lambda functions and the CodeBuild project) can remain after destruction; delete them manually if wanted.

@@ -1,36 +1,37 @@
-.PHONY: install test synth diff bootstrap deploy runtime destroy outputs drift
+.PHONY: install test package synth diff bootstrap deploy destroy outputs drift
 
 PY := ../.venv/bin/python
 CDK := PATH="$(CURDIR)/node_modules/.bin:$(PATH)" node node_modules/aws-cdk/bin/cdk
-export PATH := $(CURDIR)/node_modules/.bin:$(PATH)
 
-install:
+install:  ## Install locked CDK libraries, CLI and pinned Node
 	../.venv/bin/pip install --require-hashes -r requirements.lock
 	npm ci
 
-test:
+test:  ## Offline template assertions (no AWS credentials needed)
 	$(PY) -m pytest -q tests
 
-synth:
+package:  ## Build the Lambda bundle and website that CDK uploads
+	bash ../deploy/package.sh
+	npm --prefix ../frontend run build
+
+synth: package  ## Render templates with cdk-nag checks (no AWS changes)
 	$(CDK) synth --strict
 
-diff:
+diff: package  ## Show what would change in AWS
 	$(CDK) diff
 
-bootstrap:
+bootstrap:  ## One-time per account/region
 	$(CDK) bootstrap
 
-deploy:
-	$(PY) lifecycle.py deploy
+deploy: package  ## Create or update both stacks (model image builds in CodeBuild)
+	$(CDK) deploy --all --require-approval never
 
-runtime:
-	$(PY) lifecycle.py runtime
+destroy:  ## Delete both stacks, including workshop data and users
+	$(CDK) destroy --all --force
 
-destroy:
-	$(PY) lifecycle.py destroy
+outputs:  ## Show website and login details
+	aws cloudformation describe-stacks --stack-name $${NEVERMIND_PROJECT:-nevermind}-app \
+	  --query 'Stacks[0].Outputs' --output table
 
-outputs:
-	$(PY) lifecycle.py outputs
-
-drift:
-	$(CDK) drift --fail
+drift:  ## Compare deployed resources with their templates
+	$(CDK) drift --all --fail

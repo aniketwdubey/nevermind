@@ -1,16 +1,12 @@
 from __future__ import annotations
 
 import aws_cdk as cdk
-from aws_cdk import aws_ecr as ecr
 from aws_cdk import aws_iam as iam
-from aws_cdk import aws_kms as kms
 from aws_cdk import aws_s3 as s3
 from constructs import Construct
 
 
-def disposable_bucket(
-    scope: Construct, logical_id: str, *, build_inputs: bool = False
-) -> s3.CfnBucket:
+def disposable_bucket(scope: Construct, logical_id: str) -> s3.CfnBucket:
     bucket = s3.Bucket(
         scope,
         logical_id,
@@ -19,15 +15,6 @@ def disposable_bucket(
         versioned=True,
         removal_policy=cdk.RemovalPolicy.DESTROY,
         auto_delete_objects=True,
-        lifecycle_rules=[
-            s3.LifecycleRule(
-                id="OldInputs",
-                noncurrent_version_expiration=cdk.Duration.days(7),
-                abort_incomplete_multipart_upload_after=cdk.Duration.days(1),
-            )
-        ]
-        if build_inputs
-        else None,
     )
     resource = bucket.node.default_child
     if not isinstance(resource, s3.CfnBucket):
@@ -63,17 +50,8 @@ def configure_stack(stack: cdk.Stack, description: str) -> None:
             # Existing logical IDs are the migration boundary; changing them replaces live resources.
             child.override_logical_id(child.node.id)
             child.cfn_options.deletion_policy = cdk.CfnDeletionPolicy.DELETE
-            if child.cfn_resource_type in {
-                "AWS::DynamoDB::Table",
-                "AWS::Cognito::UserPool",
-                "AWS::KMS::Key",
-                "AWS::ECR::Repository",
-            }:
+            if child.cfn_resource_type in {"AWS::DynamoDB::Table", "AWS::Cognito::UserPool"}:
                 child.cfn_options.update_replace_policy = cdk.CfnDeletionPolicy.RETAIN
-            if isinstance(child, kms.CfnKey):
-                child.pending_window_in_days = 7
-            if isinstance(child, ecr.CfnRepository):
-                child.empty_on_delete = True
     for child in stack.node.find_all():
         if isinstance(child, s3.CfnBucket):
             child.cfn_options.deletion_policy = cdk.CfnDeletionPolicy.DELETE

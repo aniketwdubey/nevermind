@@ -5,6 +5,7 @@
   "pathMetadata": false,
   "assetMetadata": false,
   "context": {
-    "@aws-cdk/core:checkSecretUsage": true
+    "@aws-cdk/core:checkSecretUsage": true,
+    "@aws-cdk/core:defaultCrossStackReferences": "strong"
   }
 }

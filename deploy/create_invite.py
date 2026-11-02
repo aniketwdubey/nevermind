@@ -30,10 +30,13 @@ def main() -> None:
         parser.error(
             "A local login file already exists. Do not overwrite an existing user's credentials."
         )
-    outputs = {
-        entry["OutputKey"]: entry["OutputValue"]
-        for entry in json.loads((directory / "app-outputs.json").read_text())
-    }
+    session = boto3.Session()
+    # Read the deployed application's public outputs directly from CloudFormation.
+    stack = session.client("cloudformation").describe_stacks(
+        StackName=os.environ.get("NEVERMIND_PROJECT", "nevermind") + "-app"
+    )["Stacks"][0]
+    outputs = {entry["OutputKey"]: entry["OutputValue"] for entry in stack["Outputs"]}
+    directory.mkdir(parents=True, exist_ok=True)
     password = (
         "Aa9!" + secrets.token_urlsafe(24)
         if arguments.generate
@@ -41,7 +44,7 @@ def main() -> None:
     )
     if not arguments.generate and password != getpass.getpass("Confirm password: "):
         parser.error("The passwords do not match.")
-    client = boto3.Session().client("cognito-idp")
+    client = session.client("cognito-idp")
     client.admin_create_user(
         UserPoolId=outputs["UserPoolId"],
         Username=arguments.username,

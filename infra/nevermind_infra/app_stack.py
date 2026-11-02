@@ -1,12 +1,16 @@
+from pathlib import Path
+
 import aws_cdk as cdk
 import aws_cdk.aws_apigatewayv2 as apigatewayv2
 import aws_cdk.aws_cloudfront as cloudfront
 import aws_cdk.aws_cognito as cognito
 import aws_cdk.aws_dynamodb as dynamodb
 import aws_cdk.aws_iam as iam
-import aws_cdk.aws_kms as kms
 import aws_cdk.aws_lambda as aws_lambda
 import aws_cdk.aws_logs as logs
+import aws_cdk.aws_s3 as s3
+import aws_cdk.aws_s3_assets as s3_assets
+import aws_cdk.aws_s3_deployment as s3_deployment
 import aws_cdk.aws_sqs as sqs
 from aws_cdk import Stack
 from constructs import Construct
@@ -16,78 +20,26 @@ from .helpers import add_bucket_policy, configure_stack, disposable_bucket
 
 class ApplicationStack(Stack):
     def __init__(
-        self, scope: Construct, construct_id: str, *, env: cdk.Environment, stack_name: str
+        self,
+        scope: Construct,
+        construct_id: str,
+        *,
+        env: cdk.Environment,
+        stack_name: str,
+        runtime_arn: str,
+        runtime_qualifier: str,
+        lambda_code: Path,
+        website_files: Path,
     ) -> None:
         super().__init__(scope, construct_id, env=env, stack_name=stack_name)
-        code_bucket = cdk.CfnParameter(
-            self, "CodeBucket", type="String", allowed_pattern="[a-z0-9.-]+"
-        )
-        code_key = cdk.CfnParameter(
-            self, "CodeKey", type="String", allowed_pattern="[A-Za-z0-9/_.-]+"
-        )
-        runtime_arn = cdk.CfnParameter(
-            self,
-            "RuntimeArn",
-            type="String",
-            allowed_pattern="arn:aws:bedrock-agentcore:[a-z0-9-]+:[0-9]{12}:runtime/[A-Za-z0-9_-]+",
-        )
-        runtime_qualifier = cdk.CfnParameter(
-            self,
-            "RuntimeQualifier",
-            type="String",
-            default="probe",
-            allowed_pattern="[A-Za-z0-9_]+",
-        )
+        code = s3_assets.Asset(self, "LambdaCode", path=str(lambda_code))
+        endpoint_names = {"RuntimeArn": runtime_arn, "RuntimeQualifier": runtime_qualifier}
         failed_jobs = sqs.CfnQueue(
             self, "FailedJobs", sqs_managed_sse_enabled=True, message_retention_period=604800
         )
         http_api = apigatewayv2.CfnApi(
             self, "HttpApi", name=cdk.Fn.sub("${AWS::StackName}-api"), protocol_type="HTTP"
         )
-        log_key = kms.CfnKey(
-            self,
-            "LogKey",
-            description="Nevermind application log encryption",
-            enable_key_rotation=True,
-            key_policy={
-                "Version": "2012-10-17",
-                "Statement": [
-                    {
-                        "Effect": "Allow",
-                        "Principal": {
-                            "AWS": cdk.Fn.sub("arn:${AWS::Partition}:iam::${AWS::AccountId}:root")
-                        },
-                        "Action": "kms:*",
-                        "Resource": "*",
-                    },
-                    {
-                        "Effect": "Allow",
-                        "Principal": {"Service": cdk.Fn.sub("logs.${AWS::Region}.amazonaws.com")},
-                        "Action": [
-                            "kms:Encrypt",
-                            "kms:Decrypt",
-                            "kms:ReEncrypt*",
-                            "kms:GenerateDataKey*",
-                            "kms:DescribeKey",
-                        ],
-                        "Resource": "*",
-                        "Condition": {
-                            "ArnLike": {
-                                "kms:EncryptionContext:aws:logs:arn": [
-                                    cdk.Fn.sub(
-                                        "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-*"
-                                    ),
-                                    cdk.Fn.sub(
-                                        "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/apigateway/${AWS::StackName}"
-                                    ),
-                                ]
-                            }
-                        },
-                    },
-                ],
-            },
-        )
-        log_key.cfn_options.deletion_policy = cdk.CfnDeletionPolicy.RETAIN
         no_api_cache = cloudfront.CfnCachePolicy(
             self,
             "NoApiCache",
@@ -167,7 +119,7 @@ class ApplicationStack(Stack):
                 "signingProtocol": "sigv4",
             },
         )
-        web_files = disposable_bucket(self, "WebFiles", build_inputs=False)
+        web_files = disposable_bucket(self, "WebFiles")
         web_files.cfn_options.deletion_policy = cdk.CfnDeletionPolicy.RETAIN
         web_headers = cloudfront.CfnResponseHeadersPolicy(
             self,
@@ -194,7 +146,6 @@ class ApplicationStack(Stack):
             self,
             "ApiLog",
             log_group_name=cdk.Fn.sub("/aws/lambda/${AWS::StackName}-api"),
-            kms_key_id=log_key.attr_arn,
             retention_in_days=7,
         )
         sqs.CfnQueuePolicy(
@@ -218,7 +169,6 @@ class ApplicationStack(Stack):
             self,
             "HttpLog",
             log_group_name=cdk.Fn.sub("/aws/apigateway/${AWS::StackName}"),
-            kms_key_id=log_key.attr_arn,
             retention_in_days=7,
         )
         jobs = sqs.CfnQueue(
@@ -303,7 +253,6 @@ class ApplicationStack(Stack):
             self,
             "WorkerLog",
             log_group_name=cdk.Fn.sub("/aws/lambda/${AWS::StackName}-worker"),
-            kms_key_id=log_key.attr_arn,
             retention_in_days=7,
         )
         api_role = iam.CfnRole(
@@ -496,9 +445,10 @@ class ApplicationStack(Stack):
                                     "bedrock-agentcore:StopRuntimeSession",
                                 ],
                                 "Resource": [
-                                    runtime_arn.value_as_string,
+                                    runtime_arn,
                                     cdk.Fn.sub(
-                                        "${RuntimeArn}/runtime-endpoint/${RuntimeQualifier}"
+                                        "${RuntimeArn}/runtime-endpoint/${RuntimeQualifier}",
+                                        endpoint_names,
                                     ),
                                 ],
                             },
@@ -520,15 +470,15 @@ class ApplicationStack(Stack):
             architectures=["x86_64"],
             handler="nevermind.handler.handler",
             role=api_role.attr_arn,
-            code={"s3Bucket": code_bucket.value_as_string, "s3Key": code_key.value_as_string},
+            code={"s3Bucket": code.s3_bucket_name, "s3Key": code.s3_object_key},
             timeout=20,
             memory_size=256,
             environment={
                 "variables": {
                     "NEVERMIND_TABLE_NAME": state.ref,
                     "NEVERMIND_QUEUE_URL": jobs.ref,
-                    "NEVERMIND_RUNTIME_ARN": runtime_arn.value_as_string,
-                    "NEVERMIND_RUNTIME_QUALIFIER": runtime_qualifier.value_as_string,
+                    "NEVERMIND_RUNTIME_ARN": runtime_arn,
+                    "NEVERMIND_RUNTIME_QUALIFIER": runtime_qualifier,
                 }
             },
         )
@@ -558,15 +508,15 @@ class ApplicationStack(Stack):
             architectures=["x86_64"],
             handler="nevermind.handler.handler",
             role=worker_role.attr_arn,
-            code={"s3Bucket": code_bucket.value_as_string, "s3Key": code_key.value_as_string},
+            code={"s3Bucket": code.s3_bucket_name, "s3Key": code.s3_object_key},
             timeout=240,
             memory_size=512,
             environment={
                 "variables": {
                     "NEVERMIND_TABLE_NAME": state.ref,
                     "NEVERMIND_QUEUE_URL": jobs.ref,
-                    "NEVERMIND_RUNTIME_ARN": runtime_arn.value_as_string,
-                    "NEVERMIND_RUNTIME_QUALIFIER": runtime_qualifier.value_as_string,
+                    "NEVERMIND_RUNTIME_ARN": runtime_arn,
+                    "NEVERMIND_RUNTIME_QUALIFIER": runtime_qualifier,
                 }
             },
         )
@@ -642,7 +592,59 @@ class ApplicationStack(Stack):
             client_id=browser_client.ref,
             use_cognito_provided_values=True,
         )
+        self._publish_website(website, web_files, website_files, browser_client.ref)
         configure_stack(
             self,
             "Nevermind protected workshop sandbox with asynchronous model analysis and transactional approvals.",
+        )
+
+    def _publish_website(
+        self,
+        website: cloudfront.CfnDistribution,
+        web_files: s3.CfnBucket,
+        files: Path,
+        client_id: str,
+    ) -> None:
+        bucket = web_files.node.scope
+        if not isinstance(bucket, s3.Bucket):
+            raise TypeError("Expected the managed website bucket.")
+        distribution = cloudfront.Distribution.from_distribution_attributes(
+            self,
+            "WebsiteDistribution",
+            distribution_id=website.ref,
+            domain_name=website.attr_domain_name,
+        )
+        # Fingerprinted build files never change under the same name and can be cached for a year.
+        s3_deployment.BucketDeployment(
+            self,
+            "WebsiteAssets",
+            sources=[s3_deployment.Source.asset(str(files / "assets"))],
+            destination_bucket=bucket,
+            destination_key_prefix="assets/",
+            cache_control=[
+                s3_deployment.CacheControl.from_string("public,max-age=31536000,immutable")
+            ],
+            memory_limit=512,
+        )
+        # The page and its public sign-in settings must always be revalidated.
+        s3_deployment.BucketDeployment(
+            self,
+            "WebsitePage",
+            sources=[
+                s3_deployment.Source.asset(str(files), exclude=["assets", "assets/*"]),
+                s3_deployment.Source.json_data(
+                    "config.json",
+                    {
+                        "clientId": client_id,
+                        "loginUrl": self.login_url,
+                        "redirectUrl": cdk.Fn.join("", [self.website_url, "/"]),
+                    },
+                ),
+            ],
+            destination_bucket=bucket,
+            cache_control=[s3_deployment.CacheControl.no_cache()],
+            prune=False,
+            distribution=distribution,
+            distribution_paths=["/index.html", "/config.json"],
+            memory_limit=512,
         )
